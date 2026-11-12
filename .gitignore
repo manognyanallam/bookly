@@ -1,0 +1,59 @@
+# Dependencies
+/node_modules/
+
+# Next.js build output
+/.next/
+/out/
+/build/
+/dist/
+
+# Deployment output
+/.vercel/
+
+# Environment files may contain secrets. Commit only a deliberately sanitized
+# example file if the project adds one.
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Caches and generated reports
+.cache/
+.eslintcache
+.turbo/
+/coverage/
+*.tsbuildinfo
+
+# Local temporary files
+*.tmp
+*.temp
+*.bak
+/tmp/
+/temp/
+/scratch/audio_temp/
+/scratch/audio_temp_te/
+/scratch/test_*.mp3
+
+# Operating system and editor artifacts
+.DS_Store
+Thumbs.db
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Scratch and temporary files
+scratch/
+*.log
+
+# Scratch outputs
+scratch/*.json
+scratch/*.png

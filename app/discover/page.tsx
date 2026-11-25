@@ -5,8 +5,8 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { BookCard } from '@/components/books/BookCard';
 import { BooklyWatermark } from '@/components/layout/BooklyWatermark';
 import { INITIAL_BOOKS } from '@/lib/db/booksData';
-import { getStoredBooks, getUserProgressMap } from '@/lib/db/storage';
-import { Book, ListeningProgress } from '@/types/book';
+import { getStoredBooks } from '@/lib/db/storage';
+import { Book } from '@/types/book';
 import {
   Compass,
   Search,
@@ -42,26 +42,22 @@ function DiscoverContent() {
   const [selectedCategory, setSelectedCategory] = useState<string>(initialGenre);
   const [searchFilter, setSearchFilter] = useState<string>(initialQuery);
   const [sortBy, setSortBy] = useState<'popularity' | 'rating' | 'duration' | 'title'>('popularity');
-  const [progressMap, setProgressMap] = useState<Record<string, ListeningProgress>>({});
 
-  useEffect(() => {
-    const syncData = () => {
-      setBooks(getStoredBooks());
-      setProgressMap(getUserProgressMap());
-    };
-    syncData();
+ useEffect(() => {
+  const syncBooks = () => {
+    setBooks(getStoredBooks());
+  };
 
-    window.addEventListener('bookly-progress-change', syncData);
-    window.addEventListener('bookly-library-change', syncData);
-    window.addEventListener('storage', syncData);
+  syncBooks();
 
-    return () => {
-      window.removeEventListener('bookly-progress-change', syncData);
-      window.removeEventListener('bookly-library-change', syncData);
-      window.removeEventListener('storage', syncData);
-    };
-  }, []);
+  window.addEventListener('bookly-library-change', syncBooks);
+  window.addEventListener('storage', syncBooks);
 
+  return () => {
+    window.removeEventListener('bookly-library-change', syncBooks);
+    window.removeEventListener('storage', syncBooks);
+  };
+}, []);
   useEffect(() => {
     const genreParam = searchParams.get('genre');
     if (genreParam) {

@@ -117,7 +117,19 @@ types/                       Shared TypeScript types
 - Node.js compatible with Next.js 14.
 - npm.
 
-No environment variables or external API keys are required for the current local app. The project does not currently read environment variables for its normal development or build flow. Do not commit real credentials if integrations are added later.
+## Authentication setup
+
+The app uses Supabase Authentication. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` in `.env.local` for local development and in the deployment platform's environment settings for production. These are the project URL and publishable (formerly anon) key; never put a Supabase service-role key in frontend code or a `NEXT_PUBLIC_` variable.
+
+In Supabase Dashboard, open **Authentication → URL Configuration**:
+
+- Set **Site URL** to `https://bookly-3m0x.onrender.com` for production.
+- Add `https://bookly-3m0x.onrender.com/auth/callback` and `https://bookly-3m0x.onrender.com/reset-password` to **Redirect URLs**.
+- Also add `http://localhost:3000/auth/callback` and `http://localhost:3000/reset-password` to **Redirect URLs** for local development. The app supplies the current origin explicitly, so production authentication links do not use localhost.
+
+Email confirmation is controlled by Supabase, not by this app. Keep confirmation enabled if required. Supabase's default email service has delivery and rate limits; for reliable production delivery, configure a custom SMTP provider in the Supabase Dashboard's Authentication email/SMTP settings. Keep SMTP credentials in Supabase's secure project settings (or server-only environment configuration when self-hosting); do not add them to frontend code, commit them, or expose them through `NEXT_PUBLIC_` variables. Verify the sender domain and check Supabase Auth logs and the SMTP provider's delivery logs when messages fail.
+
+The app's signup confirmation links return to `/auth/callback`; password recovery links return to `/reset-password`. No service-role key or SMTP secret is needed by the browser app.
 
 ## Installation and local development
 

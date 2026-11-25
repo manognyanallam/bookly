@@ -1,71 +1,158 @@
 'use client';
 
+'use client';
+
 import React, { useState, useEffect, Suspense, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { BookCard } from '@/components/books/BookCard';
-import { getStoredBooks, getUserLibrary, getUserProgressMap, removeUserLibraryItem } from '@/lib/db/storage';
+import { getStoredBooks } from '@/lib/db/storage';
+import {
+  getUserLibrary,
+  getUserProgressMap,
+} from '@/lib/db/userData';
+import { useAuth } from '@/components/auth/AuthProvider';
 import { Book, LibraryItem, ListeningProgress } from '@/types/book';
-import { Bookmark, Play, CheckCircle2, Clock, Trash2, Award, Headphones, Compass, Sparkles, BookOpen } from 'lucide-react';
+import {
+  Bookmark,
+  CheckCircle2,
+  Clock,
+  Award,
+  Headphones,
+  Compass,
+} from 'lucide-react';
 import Link from 'next/link';
 import { BooklyWatermark } from '@/components/layout/BooklyWatermark';
+
 
 function LibraryContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const tabParam = searchParams.get('tab') as 'saved' | 'listening' | 'completed' | null;
+
+  const { user, loading: authLoading } = useAuth();
+
+  const tabParam = searchParams.get('tab') as
+    | 'saved'
+    | 'listening'
+    | 'completed'
+    | null;
 
   const [books, setBooks] = useState<Book[]>([]);
   const [library, setLibrary] = useState<LibraryItem[]>([]);
-  const [progressMap, setProgressMap] = useState<Record<string, ListeningProgress>>({});
-  
-  // Default tab is 'saved' unless URL explicitly requests ?tab=listening or ?tab=completed
-  const [activeTab, setActiveTab] = useState<'saved' | 'listening' | 'completed'>(() => {
-    if (tabParam === 'listening' || tabParam === 'completed') return tabParam;
+  const [progressMap, setProgressMap] = useState<
+    Record<string, ListeningProgress>
+  >({});
+
+  const [activeTab, setActiveTab] = useState<
+    'saved' | 'listening' | 'completed'
+  >(() => {
+    if (
+      tabParam === 'listening' ||
+      tabParam === 'completed'
+    ) {
+      return tabParam;
+    }
+
     return 'saved';
   });
 
-  const handleTabChange = (tab: 'saved' | 'listening' | 'completed') => {
+  const handleTabChange = (
+    tab: 'saved' | 'listening' | 'completed'
+  ) => {
     setActiveTab(tab);
+
     if (tab === 'listening') {
-      router.replace('/library?tab=listening', { scroll: false });
+      router.replace('/library?tab=listening', {
+        scroll: false,
+      });
     } else if (tab === 'completed') {
-      router.replace('/library?tab=completed', { scroll: false });
+      router.replace('/library?tab=completed', {
+        scroll: false,
+      });
     } else {
-      router.replace('/library', { scroll: false });
+      router.replace('/library', {
+        scroll: false,
+      });
     }
   };
 
-  const refreshData = () => {
-    setBooks(getStoredBooks());
-    setLibrary(getUserLibrary());
-    setProgressMap(getUserProgressMap());
-  };
-
+  // Load the shared book catalogue and the current user's
+  // personal library and listening progress from Supabase.
   useEffect(() => {
-    refreshData();
+    if (authLoading) return;
 
-    const handleUpdate = () => refreshData();
-    window.addEventListener('bookly-library-change', handleUpdate);
-    window.addEventListener('bookly-progress-change', handleUpdate);
+    let active = true;
+
+    const refreshData = async () => {
+      setBooks(getStoredBooks());
+
+      if (!user?.id) {
+        if (active) {
+          setLibrary([]);
+          setProgressMap({});
+        }
+        return;
+      }
+
+      try {
+        const [libraryData, progressData] = await Promise.all([
+          getUserLibrary(user.id),
+          getUserProgressMap(user.id),
+        ]);
+
+        if (!active) return;
+
+        setLibrary(libraryData);
+        setProgressMap(progressData);
+      } catch (error) {
+        console.error('Failed to load library data:', error);
+      }
+    };
+
+    void refreshData();
+
+    const handleUpdate = () => {
+      void refreshData();
+    };
+
+    window.addEventListener(
+      'bookly-library-change',
+      handleUpdate
+    );
+
+    window.addEventListener(
+      'bookly-progress-change',
+      handleUpdate
+    );
+
     window.addEventListener('storage', handleUpdate);
 
     return () => {
-      window.removeEventListener('bookly-library-change', handleUpdate);
-      window.removeEventListener('bookly-progress-change', handleUpdate);
+      active = false;
+
+      window.removeEventListener(
+        'bookly-library-change',
+        handleUpdate
+      );
+
+      window.removeEventListener(
+        'bookly-progress-change',
+        handleUpdate
+      );
+
       window.removeEventListener('storage', handleUpdate);
     };
-  }, []);
+  }, [user?.id, authLoading]);
 
+  // Keep the URL and selected tab synchronized.
   useEffect(() => {
-    if (tabParam === 'listening' || tabParam === 'saved' || tabParam === 'completed') {
+    if (
+      tabParam === 'listening' ||
+      tabParam === 'saved' ||
+      tabParam === 'completed'
+    ) {
       setActiveTab(tabParam);
     }
   }, [tabParam]);
-
-  const handleRemove = (bookId: string) => {
-    removeUserLibraryItem(bookId);
-    refreshData();
-  };
 
   // 1. Saved Books: ONLY books explicitly bookmarked by user
   const savedBooks = useMemo(() => {
@@ -122,6 +209,32 @@ function LibraryContent() {
           Your bookmarked titles, active listening sessions, and completed audio summaries in English and Telugu.
         </p>
       </div>
+
+      {!authLoading && !user && (
+        <div
+          role="status"
+          className="relative z-10 flex flex-col gap-3 rounded-2xl border border-forest-200 bg-forest-50 p-4 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <p className="text-sm text-forest-900">
+            Sign in to view your saved books and listening progress. You can
+            browse and listen to the catalogue as a guest.
+          </p>
+          <div className="flex shrink-0 gap-2">
+            <Link
+              href="/login"
+              className="rounded-full border border-forest-700 px-4 py-2 text-sm font-semibold text-forest-800"
+            >
+              Sign in
+            </Link>
+            <Link
+              href="/signup"
+              className="rounded-full bg-forest-700 px-4 py-2 text-sm font-semibold text-white"
+            >
+              Sign up
+            </Link>
+          </div>
+        </div>
+      )}
 
       {/* Listening Stats Banner */}
       <div className="relative z-10 grid grid-cols-1 sm:grid-cols-3 gap-4 bg-white/95 backdrop-blur-sm border border-[#E5DFD5] rounded-3xl p-5 sm:p-6 shadow-sm">

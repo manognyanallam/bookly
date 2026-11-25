@@ -4,13 +4,15 @@ import React, { useState, useEffect } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
+import { getStoredBooks } from '@/lib/db/storage';
 import {
-  getStoredBooks,
   getUserLibrary,
   saveUserLibraryItem,
   removeUserLibraryItem,
   getBookProgress,
-} from '@/lib/db/storage';
+} from '@/lib/db/userData';
+import { useAuth } from '@/components/auth/AuthProvider';
+import { GuestAuthPrompt } from '@/components/auth/GuestAuthPrompt';
 import { getLearningGuide } from '@/lib/db/learningGuides';
 import { getBookVisualGuideForBook } from '@/lib/db/visualGuides';
 import { BooklyWatermark } from '@/components/layout/BooklyWatermark';
@@ -60,6 +62,7 @@ function findBookBySlug(books: Book[], slug: string): Book | null {
 }
 
 export default function BookDetailPage() {
+  const { user, loading: authLoading } = useAuth();
   const params = useParams();
   const router = useRouter();
   const slug = params?.slug as string;
@@ -73,6 +76,7 @@ export default function BookDetailPage() {
   const [selectedLanguage, setSelectedLanguage] = useState<AudioLanguage>('en');
   const [imageError, setImageError] = useState(false);
   const [readingProgress, setReadingProgress] = useState<number>(0);
+  const [showGuestPrompt, setShowGuestPrompt] = useState(false);
 
   const {
     currentBook,
@@ -98,40 +102,80 @@ export default function BookDetailPage() {
   }, []);
 
   useEffect(() => {
-    const syncState = () => {
-      const books = getStoredBooks();
-      setAllBooks(books);
-      const found = findBookBySlug(books, slug);
-      setIsBookLoaded(true);
-      setBook(found);
-      if (found) {
-        // Check library status (explicit saved status only)
-        const lib = getUserLibrary();
-        setIsSaved(lib.some((item) => item.bookId === found.id && item.status === 'saved'));
+    if (authLoading) return;
 
-        // Check listening progress for active language
-        const savedProg = getBookProgress(found.id, selectedLanguage);
-        if (savedProg) {
-          setProgressPercent(savedProg.progressPercentage);
-        } else {
+    let active = true;
+
+    const syncState = async () => {
+      const books = getStoredBooks();
+
+      if (!active) return;
+
+      setAllBooks(books);
+
+      const found = findBookBySlug(books, slug);
+
+      setBook(found);
+      setIsBookLoaded(true);
+
+      if (!found) {
+        setIsSaved(false);
+        setProgressPercent(0);
+        return;
+      }
+
+      // Guests have no personal saved-book or progress data.
+      if (!user?.id) {
+        setIsSaved(false);
+        setProgressPercent(0);
+        return;
+      }
+
+      try {
+        const [libraryData, savedProgress] = await Promise.all([
+          getUserLibrary(user.id),
+          getBookProgress(user.id, found.id, selectedLanguage),
+        ]);
+
+        if (!active) return;
+
+        setIsSaved(
+          libraryData.some(
+            (item) => item.bookId === found.id && item.status === 'saved'
+          )
+        );
+
+        setProgressPercent(
+          savedProgress?.progressPercentage ?? 0
+        );
+      } catch (error) {
+        console.error('Failed to load book user data:', error);
+
+        if (active) {
+          setIsSaved(false);
           setProgressPercent(0);
         }
       }
     };
 
-    syncState();
+    void syncState();
 
-    window.addEventListener('bookly-library-change', syncState);
-    window.addEventListener('bookly-progress-change', syncState);
-    window.addEventListener('storage', syncState);
+    const handleUpdate = () => {
+      void syncState();
+    };
+
+    window.addEventListener('bookly-library-change', handleUpdate);
+    window.addEventListener('bookly-progress-change', handleUpdate);
+    window.addEventListener('storage', handleUpdate);
 
     return () => {
-      window.removeEventListener('bookly-library-change', syncState);
-      window.removeEventListener('bookly-progress-change', syncState);
-      window.removeEventListener('storage', syncState);
-    };
-  }, [slug, selectedLanguage, currentBook?.id]);
+      active = false;
 
+      window.removeEventListener('bookly-library-change', handleUpdate);
+      window.removeEventListener('bookly-progress-change', handleUpdate);
+      window.removeEventListener('storage', handleUpdate);
+    };
+  }, [slug, selectedLanguage, currentBook?.id, user?.id, authLoading]);
   // Sync selected language if player changes it for this book
   useEffect(() => {
     if (currentBook && (currentBook.slug === slug || currentBook.id === slug)) {
@@ -139,28 +183,61 @@ export default function BookDetailPage() {
     }
   }, [currentLanguage, currentBook, slug]);
 
-  const handleLanguageChange = (newLang: AudioLanguage) => {
+    const handleLanguageChange = async (newLang: AudioLanguage) => {
     setSelectedLanguage(newLang);
     setPlayerLanguage(newLang);
 
-    if (book) {
-      const savedProg = getBookProgress(book.id, newLang);
-      setProgressPercent(savedProg ? savedProg.progressPercentage : 0);
+    if (!book || !user?.id) {
+      setProgressPercent(0);
+      return;
+    }
+
+    try {
+      const savedProgress = await getBookProgress(
+        user.id,
+        book.id,
+        newLang
+      );
+
+      setProgressPercent(
+        savedProgress?.progressPercentage ?? 0
+      );
+    } catch (error) {
+      console.error('Failed to load language progress:', error);
+      setProgressPercent(0);
     }
   };
 
-  const handleToggleSave = () => {
+    const handleToggleSave = async () => {
     if (!book) return;
-    if (isSaved) {
-      removeUserLibraryItem(book.id);
-      setIsSaved(false);
-    } else {
-      saveUserLibraryItem({
-        bookId: book.id,
-        savedAt: new Date().toISOString(),
-        status: 'saved',
-      });
-      setIsSaved(true);
+
+      if (authLoading) return;
+
+      // Guests can browse and listen, but personal features require an account.
+    if (!user?.id) {
+        setShowGuestPrompt(true);
+      return;
+    }
+
+    try {
+      if (isSaved) {
+        await removeUserLibraryItem(user.id, book.id);
+        setIsSaved(false);
+      } else {
+        await saveUserLibraryItem(user.id, {
+          bookId: book.id,
+          savedAt: new Date().toISOString(),
+          status: 'saved',
+        });
+
+        setIsSaved(true);
+      }
+
+      window.dispatchEvent(
+        new Event('bookly-library-change')
+      );
+    } catch (error) {
+      console.error('Failed to update saved book:', error);
     }
   };
 
@@ -246,6 +323,10 @@ export default function BookDetailPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
+      {showGuestPrompt && (
+        <GuestAuthPrompt onClose={() => setShowGuestPrompt(false)} />
+      )}
+
       {/* Top Reading Progress Indicator */}
       <div
         className="fixed top-0 left-0 h-1 bg-gradient-to-r from-forest-700 via-sage-500 to-gold-500 z-50 transition-all duration-150"

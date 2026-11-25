@@ -8,7 +8,9 @@ import { BooklyWatermark } from '@/components/layout/BooklyWatermark';
 import { BookCard } from '@/components/books/BookCard';
 import { useAudioPlayer } from '@/components/player/AudioPlayerContext';
 import { INITIAL_BOOKS } from '@/lib/db/booksData';
-import { getStoredBooks, getUserProgressMap } from '@/lib/db/storage';
+import { getStoredBooks } from '@/lib/db/storage';
+import { getUserProgressMap } from '@/lib/db/userData';
+import { useAuth } from '@/components/auth/AuthProvider';
 import { Book, ListeningProgress } from '@/types/book';
 import {
   Sparkles,
@@ -39,6 +41,7 @@ const CURATED_CATEGORIES = [
 ];
 
 export default function HomePage() {
+  const { user, loading: authLoading } = useAuth();
   const router = useRouter();
   const { playBook } = useAudioPlayer();
   const [books, setBooks] = useState<Book[]>(INITIAL_BOOKS);
@@ -48,23 +51,55 @@ export default function HomePage() {
   const [sortBy, setSortBy] = useState<'popularity' | 'rating' | 'duration' | 'title'>('popularity');
   const catalogRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const syncData = () => {
-      setBooks(getStoredBooks());
-      setProgressMap(getUserProgressMap());
-    };
-    syncData();
+    useEffect(() => {
+    if (authLoading) return;
 
-    window.addEventListener('bookly-progress-change', syncData);
-    window.addEventListener('bookly-library-change', syncData);
-    window.addEventListener('storage', syncData);
+    let active = true;
+
+    const syncData = async () => {
+      setBooks(getStoredBooks());
+
+      // Guests should not see another user's listening progress.
+      if (!user?.id) {
+        if (active) {
+          setProgressMap({});
+        }
+        return;
+      }
+
+      try {
+        const progress = await getUserProgressMap(user.id);
+
+        if (active) {
+          setProgressMap(progress);
+        }
+      } catch (error) {
+        console.error('Failed to load homepage listening progress:', error);
+
+        if (active) {
+          setProgressMap({});
+        }
+      }
+    };
+
+    void syncData();
+
+    const handleUpdate = () => {
+      void syncData();
+    };
+
+    window.addEventListener('bookly-progress-change', handleUpdate);
+    window.addEventListener('bookly-library-change', handleUpdate);
+    window.addEventListener('storage', handleUpdate);
 
     return () => {
-      window.removeEventListener('bookly-progress-change', syncData);
-      window.removeEventListener('bookly-library-change', syncData);
-      window.removeEventListener('storage', syncData);
+      active = false;
+
+      window.removeEventListener('bookly-progress-change', handleUpdate);
+      window.removeEventListener('bookly-library-change', handleUpdate);
+      window.removeEventListener('storage', handleUpdate);
     };
-  }, []);
+  }, [user?.id, authLoading]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();

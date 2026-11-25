@@ -3,7 +3,9 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Book, AudioChapter, ListeningProgress, AudioLanguage } from '@/types/book';
 import { staticAudioProvider } from '@/lib/audio/AudioProvider';
-import { getUserProgressMap, saveUserProgress, getStoredBooks, getBookProgress } from '@/lib/db/storage';
+import { getStoredBooks } from '@/lib/db/storage';
+import { getBookProgress, saveUserProgress } from '@/lib/db/userData';
+import { useAuth } from '@/components/auth/AuthProvider';
 
 interface AudioContextType {
   currentBook: Book | null;
@@ -55,6 +57,15 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const currentBookRef = useRef<Book | null>(null);
   const currentLanguageRef = useRef<AudioLanguage>('en');
   const durationRef = useRef<number>(0);
+
+  const { user, loading: authLoading } = useAuth();
+
+const userIdRef = useRef<string | null>(null);
+const playbackRequestRef = useRef(0);
+
+useEffect(() => {
+  userIdRef.current = authLoading ? null : user?.id ?? null;
+}, [user?.id, authLoading]);
 
   useEffect(() => {
     currentBookRef.current = currentBook;
@@ -180,169 +191,255 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     };
   }, []);
 
-  // Save progress periodically every 5 seconds when playing
-  useEffect(() => {
-    if (!isPlaying || !currentBook || !audioRef.current) return;
-    const interval = setInterval(() => {
-      if (audioRef.current && !audioRef.current.paused) {
-        saveProgress(currentBook, audioRef.current.currentTime);
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [isPlaying, currentBook, duration, currentLanguage]);
+  // Save progress every 15 seconds while playing
+useEffect(() => {
+  if (!isPlaying || !currentBook || !audioRef.current) return;
 
-  const saveProgress = (book: Book, time: number, isFinished = false) => {
-    const lang = currentLanguageRef.current;
-    const totalDuration =
-      durationRef.current ||
-      (lang === 'te' ? book.audio.durations?.te : book.audio.durations?.en) ||
-      book.audio.duration ||
-      900;
-    const progressPercentage = Math.min(100, Math.round((time / totalDuration) * 100));
-    // Do not mark completed before the audio genuinely finishes
-    const completed = isFinished || (totalDuration > 0 && time >= totalDuration - 2);
+  const interval = setInterval(() => {
+    if (audioRef.current && !audioRef.current.paused) {
+      saveProgress(currentBook, audioRef.current.currentTime);
+    }
+  }, 15000);
 
-    const progress: ListeningProgress = {
-      userId: 'demo_user',
-      bookId: book.id,
-      language: lang,
-      positionSeconds: Math.floor(time),
-      durationSeconds: Math.floor(totalDuration),
-      progressPercentage,
-      completed,
-      lastPlayedAt: new Date().toISOString(),
-    };
-    saveUserProgress(progress);
+  return () => clearInterval(interval);
+}, [isPlaying, currentBook, duration, currentLanguage]);
+
+
+  const saveProgress = (
+  book: Book,
+  time: number,
+  isFinished = false
+) => {
+  const userId = userIdRef.current;
+
+  // Guests can listen, but their progress is not saved.
+  if (!userId) return;
+
+  const lang = currentLanguageRef.current;
+
+  const totalDuration =
+    durationRef.current ||
+    (lang === 'te'
+      ? book.audio.durations?.te
+      : book.audio.durations?.en) ||
+    book.audio.duration ||
+    900;
+
+  const progressPercentage = Math.min(
+    100,
+    Math.round((time / totalDuration) * 100)
+  );
+
+  const completed =
+    isFinished || (totalDuration > 0 && time >= totalDuration - 2);
+
+  const progress: ListeningProgress = {
+    userId,
+    bookId: book.id,
+    language: lang,
+    positionSeconds: Math.floor(time),
+    durationSeconds: Math.floor(totalDuration),
+    progressPercentage,
+    completed,
+    lastPlayedAt: new Date().toISOString(),
   };
 
-  const setLanguage = (lang: AudioLanguage) => {
-    if (lang === currentLanguage) return;
+  void saveUserProgress(progress);
+};
+
+  const setLanguage = async (lang: AudioLanguage) => {
+  if (lang === currentLanguageRef.current) return;
+
+  const book = currentBookRef.current;
+  if (!book) {
+    currentLanguageRef.current = lang;
     setCurrentLanguage(lang);
+    return;
+  }
 
-    if (!currentBook) return;
+  const audio = audioRef.current;
+  if (!audio) return;
 
-    const audio = audioRef.current;
-    if (!audio) return;
+  const requestId = ++playbackRequestRef.current;
+  const wasPlaying = !audio.paused;
 
-    // Save current progress before switching
-    if (currentTime > 0) {
-      saveProgress(currentBook, currentTime, false);
+  // Save the previous language's progress.
+  if (audio.currentTime > 0) {
+    saveProgress(book, audio.currentTime);
+  }
+
+  currentLanguageRef.current = lang;
+  setCurrentLanguage(lang);
+
+  const targetUrl = getLanguageAudioUrl(book, lang);
+
+  if (!targetUrl) {
+    audio.pause();
+    setIsPlaying(false);
+    audio.src = '';
+    setCurrentTime(0);
+    setPlaybackError(
+      lang === 'te' ? 'Telugu audio coming soon' : 'Audio coming soon'
+    );
+    return;
+  }
+
+  let startTime = 0;
+  const userId = userIdRef.current;
+
+  if (userId) {
+    const saved = await getBookProgress(userId, book.id, lang);
+
+    if (requestId !== playbackRequestRef.current) return;
+
+    if (saved && !saved.completed && saved.positionSeconds > 5) {
+      startTime = saved.positionSeconds;
     }
+  }
 
-    const targetUrl = getLanguageAudioUrl(currentBook, lang);
-    if (!targetUrl) {
-      // Telugu audio coming soon - never silently fall back to English!
-      audio.pause();
-      setIsPlaying(false);
-      audio.src = '';
-      setCurrentTime(0);
-      setPlaybackError(lang === 'te' ? 'Telugu audio coming soon' : 'Audio coming soon');
-      return;
-    }
+  if (requestId !== playbackRequestRef.current) return;
 
-    setPlaybackError(null);
-    audio.src = targetUrl;
-    audio.playbackRate = playbackSpeed;
-    audio.volume = isMuted ? 0 : volume;
+  const targetDuration =
+    (lang === 'te'
+      ? book.audio.durations?.te
+      : book.audio.durations?.en) ||
+    book.audio.duration ||
+    900;
 
-    const targetDuration = lang === 'te'
-      ? (currentBook.audio.durations?.te || currentBook.audio.duration || 900)
-      : (currentBook.audio.durations?.en || currentBook.audio.duration || 900);
-    setDuration(targetDuration);
+  setDuration(targetDuration);
+  durationRef.current = targetDuration;
 
-    const saved = getBookProgress(currentBook.id, lang);
-    const startTime = (saved && !saved.completed && saved.positionSeconds > 5) ? saved.positionSeconds : 0;
+  audio.src = targetUrl;
+  audio.playbackRate = playbackSpeed;
+  audio.volume = isMuted ? 0 : volume;
+  audio.currentTime = startTime;
 
-    audio.currentTime = startTime;
-    setCurrentTime(startTime);
+  setCurrentTime(startTime);
+  setPlaybackError(null);
 
-    if (isPlaying) {
+  if (wasPlaying) {
+    audio.play()
+      .then(() => setIsPlaying(true))
+      .catch((err) => {
+        console.warn('Playback error on language change:', err);
+        setIsPlaying(false);
+      });
+  }
+};
+
+
+  const playBook = async (
+  book: Book,
+  initialPosition?: number,
+  lang?: AudioLanguage
+) => {
+  const audio = audioRef.current;
+  if (!audio) return;
+
+  const targetLang = lang || currentLanguageRef.current;
+
+  // Toggle playback if the same book and language are already loaded.
+  if (
+    currentBookRef.current?.id === book.id &&
+    currentLanguageRef.current === targetLang &&
+    getLanguageAudioUrl(book, targetLang)
+  ) {
+    if (audio.paused) {
       audio.play()
         .then(() => setIsPlaying(true))
         .catch((err) => {
-          console.warn('Playback error on language change:', err);
+          console.warn('Playback resume failed:', err);
           setIsPlaying(false);
+          setPlaybackError('Playback error');
         });
-    }
-  };
-
-  const playBook = (book: Book, initialPosition?: number, lang?: AudioLanguage) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    const targetLang = lang || currentLanguage;
-    if (targetLang !== currentLanguage) {
-      setCurrentLanguage(targetLang);
-    }
-
-    setPlaybackError(null);
-
-    // If same book already loaded in same language
-    if (currentBook?.id === book.id && currentLanguage === targetLang && hasAudio) {
-      if (audio.paused) {
-        audio.play()
-          .then(() => setIsPlaying(true))
-          .catch((err) => {
-            console.warn('Playback resume failed:', err);
-            setIsPlaying(false);
-            setPlaybackError('Playback error');
-          });
-      } else {
-        audio.pause();
-        setIsPlaying(false);
-      }
-      return;
-    }
-
-    setCurrentBook(book);
-    const audioUrl = getLanguageAudioUrl(book, targetLang);
-
-    if (!audioUrl) {
+    } else {
       audio.pause();
       setIsPlaying(false);
-      audio.src = '';
-      setCurrentTime(0);
-      const targetDuration = targetLang === 'te'
-        ? (book.audio.durations?.te || 900)
-        : (book.audio.durations?.en || book.audio.duration || 900);
-      setDuration(targetDuration);
-      setPlaybackError(targetLang === 'te' ? 'Telugu audio coming soon' : 'Audio coming soon');
-      return;
     }
+    return;
+  }
 
-    audio.src = audioUrl;
-    audio.playbackRate = playbackSpeed;
-    audio.volume = isMuted ? 0 : volume;
+  const requestId = ++playbackRequestRef.current;
 
-    const targetDuration = targetLang === 'te'
-      ? (book.audio.durations?.te || book.audio.duration || 900)
-      : (book.audio.durations?.en || book.audio.duration || 900);
+  currentBookRef.current = book;
+  currentLanguageRef.current = targetLang;
+
+  setCurrentBook(book);
+  setCurrentLanguage(targetLang);
+  setPlaybackError(null);
+
+  const audioUrl = getLanguageAudioUrl(book, targetLang);
+
+  if (!audioUrl) {
+    audio.pause();
+    setIsPlaying(false);
+    audio.src = '';
+    setCurrentTime(0);
+
+    const targetDuration =
+      (targetLang === 'te'
+        ? book.audio.durations?.te
+        : book.audio.durations?.en) ||
+      book.audio.duration ||
+      900;
+
     setDuration(targetDuration);
+    durationRef.current = targetDuration;
 
-    let targetTime = initialPosition;
-    if (targetTime === undefined) {
-      const saved = getBookProgress(book.id, targetLang);
+    setPlaybackError(
+      targetLang === 'te' ? 'Telugu audio coming soon' : 'Audio coming soon'
+    );
+    return;
+  }
+
+  let targetTime = initialPosition;
+
+  // Restore progress only for authenticated users.
+  if (targetTime === undefined) {
+    const userId = userIdRef.current;
+
+    if (userId) {
+      const saved = await getBookProgress(userId, book.id, targetLang);
+
+      if (requestId !== playbackRequestRef.current) return;
+
       if (saved && !saved.completed && saved.positionSeconds > 5) {
         targetTime = saved.positionSeconds;
-      } else {
-        targetTime = 0;
       }
     }
+  }
 
-    audio.currentTime = targetTime;
-    setCurrentTime(targetTime);
+  if (requestId !== playbackRequestRef.current) return;
 
-    audio.play()
-      .then(() => {
-        setIsPlaying(true);
-        setPlaybackError(null);
-      })
-      .catch((err) => {
-        console.warn('Audio play error:', err);
-        setIsPlaying(false);
-      });
-  };
+  if (targetTime === undefined) targetTime = 0;
 
+  const targetDuration =
+    (targetLang === 'te'
+      ? book.audio.durations?.te
+      : book.audio.durations?.en) ||
+    book.audio.duration ||
+    900;
+
+  setDuration(targetDuration);
+  durationRef.current = targetDuration;
+
+  audio.src = audioUrl;
+  audio.playbackRate = playbackSpeed;
+  audio.volume = isMuted ? 0 : volume;
+  audio.currentTime = targetTime;
+
+  setCurrentTime(targetTime);
+
+  audio.play()
+    .then(() => {
+      setIsPlaying(true);
+      setPlaybackError(null);
+    })
+    .catch((err) => {
+      console.warn('Audio play error:', err);
+      setIsPlaying(false);
+    });
+};
   const togglePlay = () => {
     const audio = audioRef.current;
     if (!audio || !currentBook) return;
